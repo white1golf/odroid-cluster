@@ -1,0 +1,102 @@
+---
+# Phase 2: K3s Kubernetes Cluster Setup
+# odroid-1: K3s Server (master)
+# odroid-2,3,4: K3s Agent (worker)
+
+- name: Install K3s Server on Master Node
+  hosts: k3s_master
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Check if K3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Install K3s server
+      shell: curl -sfL https://get.k3s.io | sh -
+      environment:
+        INSTALL_K3S_EXEC: "server --write-kubeconfig-mode 644"
+      when: not k3s_installed.stat.exists
+
+    - name: Wait for K3s server to be ready
+      shell: k3s kubectl get nodes
+      register: k3s_ready
+      retries: 10
+      delay: 10
+      until: k3s_ready.rc == 0
+      changed_when: false
+
+    - name: Get K3s node token
+      slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token
+
+    - name: Store token as fact
+      set_fact:
+        k3s_node_token: "{{ k3s_token.content | b64decode | trim }}"
+        k3s_master_ip: "{{ ansible_host }}"
+
+    - name: Display master status
+      debug:
+        msg: |
+          K3s Master installed successfully!
+          Master IP: {{ ansible_host }}
+          Token: {{ k3s_node_token[:20] }}...
+
+- name: Install K3s Agent on Worker Nodes
+  hosts: k3s_workers
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Check if K3s agent is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Install K3s agent
+      shell: curl -sfL https://get.k3s.io | sh -
+      environment:
+        K3S_URL: "https://{{ hostvars['odroid-1']['ansible_host'] }}:6443"
+        K3S_TOKEN: "{{ hostvars['odroid-1']['k3s_node_token'] }}"
+      when: not k3s_installed.stat.exists
+
+    - name: Wait for K3s agent to be ready
+      pause:
+        seconds: 15
+
+    - name: Display agent status
+      debug:
+        msg: "K3s Agent installed on {{ inventory_hostname }}, joining master at {{ hostvars['odroid-1']['ansible_host'] }}"
+
+- name: Verify K3s Cluster
+  hosts: k3s_master
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Wait for all nodes to register
+      pause:
+        seconds: 30
+
+    - name: Get cluster node list
+      shell: k3s kubectl get nodes -o wide
+      register: node_list
+      changed_when: false
+
+    - name: Display cluster status
+      debug:
+        msg: |
+          === K3s Cluster Status ===
+          {{ node_list.stdout }}
+
+    - name: Get cluster info
+      shell: k3s kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster info
+      debug:
+        msg: "{{ cluster_info.stdout }}"
