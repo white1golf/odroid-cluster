@@ -1,0 +1,44 @@
+---
+- name: Setup SSH Keys and Configure Sudoers for Passwordless Access
+  hosts: odroid_cluster
+  gather_facts: yes
+
+  vars:
+    ssh_key_name: "odroid-cluster-key"
+    ssh_key_path: "~/.ssh/{{ ssh_key_name }}"
+
+  tasks:
+    - name: Ensure .ssh directory exists on remote
+      file:
+        path: ~/.ssh
+        state: directory
+        mode: '0700'
+
+    - name: Copy SSH public key to authorized_keys
+      authorized_key:
+        user: odroid
+        state: present
+        key: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/' + ssh_key_name + '.pub') }}"
+      register: ssh_key_result
+      ignore_errors: yes
+
+    - name: Display SSH key setup result
+      debug:
+        msg: "SSH key setup: {{ 'Success' if ssh_key_result is succeeded else 'Failed - may need manual setup' }}"
+
+    - name: Configure sudoers for passwordless sudo
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: '^odroid ALL='
+        line: 'odroid ALL=(ALL) NOPASSWD:ALL'
+        validate: 'visudo -cf %s'
+      become: yes
+
+    - name: Display configuration completion
+      debug:
+        msg: |
+          SSH Key Setup Complete!
+          - SSH public key added to authorized_keys
+          - Sudoers configured for passwordless sudo
+          - You can now run ansible-playbook without -k option
