@@ -53,10 +53,12 @@
                 requests:
                   memory: 256Mi
                   cpu: 200m
-              # master 노드에 배치
+              # master(control-plane) 노드에 배치
               nodeSelector:
-                node-role.kubernetes.io/master: "true"
+                node-role.kubernetes.io/control-plane: "true"
               tolerations:
+                - key: node-role.kubernetes.io/control-plane
+                  effect: NoSchedule
                 - key: node-role.kubernetes.io/master
                   effect: NoSchedule
             service:
@@ -75,8 +77,10 @@
                 memory: 128Mi
                 cpu: 100m
             nodeSelector:
-              node-role.kubernetes.io/master: "true"
+              node-role.kubernetes.io/control-plane: "true"
             tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                effect: NoSchedule
               - key: node-role.kubernetes.io/master
                 effect: NoSchedule
             service:
@@ -94,8 +98,10 @@
                   memory: 64Mi
                   cpu: 50m
               nodeSelector:
-                node-role.kubernetes.io/master: "true"
+                node-role.kubernetes.io/control-plane: "true"
               tolerations:
+                - key: node-role.kubernetes.io/control-plane
+                  effect: NoSchedule
                 - key: node-role.kubernetes.io/master
                   effect: NoSchedule
             service:
@@ -130,7 +136,7 @@
           --namespace monitoring \
           --values /tmp/monitoring-values.yml \
           --kubeconfig /etc/rancher/k3s/k3s.yaml \
-          --wait --timeout 5m
+          --wait --timeout 10m
       register: helm_install
       retries: 2
       delay: 30
