@@ -1,413 +1,152 @@
 ---
-# Phase 3: Monitoring Stack (Prometheus + Grafana + AlertManager)
-# All monitoring components run on master node (odroid-1)
-# node-exporter runs on all nodes
+# Phase 3: Monitoring Stack via Helm (kube-prometheus-stack)
+# Prometheus + Grafana + AlertManager + node-exporter 한 번에 설치
 
-- name: Install node-exporter on all nodes
-  hosts: odroid_cluster
-  become: yes
-  gather_facts: yes
-
-  tasks:
-    - name: Create node-exporter DaemonSet manifest
-      when: inventory_hostname == 'odroid-1'
-      copy:
-        dest: /tmp/node-exporter.yml
-        content: |
-          apiVersion: apps/v1
-          kind: DaemonSet
-          metadata:
-            name: node-exporter
-            namespace: monitoring
-            labels:
-              app: node-exporter
-          spec:
-            selector:
-              matchLabels:
-                app: node-exporter
-            template:
-              metadata:
-                labels:
-                  app: node-exporter
-              spec:
-                hostNetwork: true
-                hostPID: true
-                tolerations:
-                  - effect: NoSchedule
-                    operator: Exists
-                containers:
-                  - name: node-exporter
-                    image: prom/node-exporter:latest
-                    ports:
-                      - containerPort: 9100
-                        hostPort: 9100
-                    volumeMounts:
-                      - name: proc
-                        mountPath: /host/proc
-                        readOnly: true
-                      - name: sys
-                        mountPath: /host/sys
-                        readOnly: true
-                      - name: rootfs
-                        mountPath: /rootfs
-                        readOnly: true
-                    args:
-                      - '--path.procfs=/host/proc'
-                      - '--path.sysfs=/host/sys'
-                      - '--path.rootfs=/rootfs'
-                    resources:
-                      limits:
-                        memory: 64Mi
-                        cpu: 100m
-                      requests:
-                        memory: 32Mi
-                        cpu: 50m
-                volumes:
-                  - name: proc
-                    hostPath:
-                      path: /proc
-                  - name: sys
-                    hostPath:
-                      path: /sys
-                  - name: rootfs
-                    hostPath:
-                      path: /
-
-- name: Deploy Monitoring Stack on Master
+- name: Install Monitoring Stack with Helm
   hosts: k3s_master
   become: yes
   gather_facts: yes
 
   tasks:
+    # 1. Helm CLI 설치
+    - name: Check if Helm is installed
+      command: helm version --short
+      register: helm_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Helm
+      shell: curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      when: helm_check.rc != 0
+
+    # 2. Helm repo 추가
+    - name: Add prometheus-community Helm repo
+      shell: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      register: repo_add
+      changed_when: "'has been added' in repo_add.stdout"
+      failed_when: false
+
+    - name: Update Helm repos
+      shell: helm repo update
+      changed_when: false
+
+    # 3. monitoring namespace 생성
     - name: Create monitoring namespace
       shell: k3s kubectl create namespace monitoring --dry-run=client -o yaml | k3s kubectl apply -f -
       changed_when: false
 
-    - name: Deploy node-exporter DaemonSet
-      shell: k3s kubectl apply -f /tmp/node-exporter.yml
-      register: node_exporter_result
-
-    - name: Create Prometheus ConfigMap
+    # 4. values 파일 생성 (ODROID N2+ 최적화)
+    - name: Create Helm values file
       copy:
-        dest: /tmp/prometheus-config.yml
+        dest: /tmp/monitoring-values.yml
         content: |
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: prometheus-config
-            namespace: monitoring
-          data:
-            prometheus.yml: |
-              global:
-                scrape_interval: 30s
-                evaluation_interval: 30s
+          # Prometheus 설정
+          prometheus:
+            prometheusSpec:
+              retention: 7d
+              retentionSize: "2GB"
+              scrapeInterval: 30s
+              resources:
+                limits:
+                  memory: 512Mi
+                  cpu: 500m
+                requests:
+                  memory: 256Mi
+                  cpu: 200m
+              # master 노드에 배치
+              nodeSelector:
+                node-role.kubernetes.io/master: "true"
+              tolerations:
+                - key: node-role.kubernetes.io/master
+                  effect: NoSchedule
+            service:
+              type: NodePort
+              nodePort: 30090
 
-              alerting:
-                alertmanagers:
-                  - static_configs:
-                      - targets:
-                          - alertmanager:9093
+          # Grafana 설정
+          grafana:
+            adminUser: admin
+            adminPassword: odroid
+            resources:
+              limits:
+                memory: 256Mi
+                cpu: 300m
+              requests:
+                memory: 128Mi
+                cpu: 100m
+            nodeSelector:
+              node-role.kubernetes.io/master: "true"
+            tolerations:
+              - key: node-role.kubernetes.io/master
+                effect: NoSchedule
+            service:
+              type: NodePort
+              nodePort: 30030
 
-              rule_files:
-                - '/etc/prometheus/alert-rules.yml'
+          # AlertManager 설정
+          alertmanager:
+            alertmanagerSpec:
+              resources:
+                limits:
+                  memory: 128Mi
+                  cpu: 100m
+                requests:
+                  memory: 64Mi
+                  cpu: 50m
+              nodeSelector:
+                node-role.kubernetes.io/master: "true"
+              tolerations:
+                - key: node-role.kubernetes.io/master
+                  effect: NoSchedule
+            service:
+              type: NodePort
+              nodePort: 30093
 
-              scrape_configs:
-                - job_name: 'prometheus'
-                  static_configs:
-                    - targets: ['localhost:9090']
+          # node-exporter (모든 노드에 DaemonSet)
+          nodeExporter:
+            resources:
+              limits:
+                memory: 64Mi
+                cpu: 100m
+              requests:
+                memory: 32Mi
+                cpu: 50m
 
-                - job_name: 'node-exporter'
-                  static_configs:
-                    - targets:
-                        - '192.168.1.241:9100'
-                        - '192.168.1.190:9100'
-                        - '192.168.1.188:9100'
-                        - '192.168.1.194:9100'
-                      labels:
-                        cluster: 'odroid'
+          # kube-state-metrics
+          kubeStateMetrics:
+            resources:
+              limits:
+                memory: 128Mi
+                cpu: 100m
+              requests:
+                memory: 64Mi
+                cpu: 50m
 
-                - job_name: 'kubernetes-nodes'
-                  scheme: https
-                  tls_config:
-                    insecure_skip_verify: true
-                  bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-                  kubernetes_sd_configs:
-                    - role: node
+    # 5. Helm으로 설치
+    - name: Install kube-prometheus-stack
+      shell: |
+        helm upgrade --install monitoring \
+          prometheus-community/kube-prometheus-stack \
+          --namespace monitoring \
+          --values /tmp/monitoring-values.yml \
+          --kubeconfig /etc/rancher/k3s/k3s.yaml \
+          --wait --timeout 5m
+      register: helm_install
+      retries: 2
+      delay: 30
+      until: helm_install.rc == 0
 
-            alert-rules.yml: |
-              groups:
-                - name: node-alerts
-                  rules:
-                    - alert: NodeDown
-                      expr: up{job="node-exporter"} == 0
-                      for: 1m
-                      labels:
-                        severity: critical
-                      annotations:
-                        summary: "Node {{ $labels.instance }} is down"
+    - name: Display Helm install result
+      debug:
+        msg: "{{ helm_install.stdout_lines[-5:] }}"
 
-                    - alert: HighMemoryUsage
-                      expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.85
-                      for: 5m
-                      labels:
-                        severity: warning
-                      annotations:
-                        summary: "High memory usage on {{ $labels.instance }}"
+    # 6. 배포 상태 확인
+    - name: Wait for pods to be ready
+      shell: k3s kubectl wait --for=condition=ready pod -l "release=monitoring" -n monitoring --timeout=120s
+      register: pods_ready
+      ignore_errors: yes
 
-                    - alert: HighCPUUsage
-                      expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
-                      for: 5m
-                      labels:
-                        severity: warning
-                      annotations:
-                        summary: "High CPU usage on {{ $labels.instance }}"
-
-                    - alert: DiskSpaceLow
-                      expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
-                      for: 5m
-                      labels:
-                        severity: warning
-                      annotations:
-                        summary: "Low disk space on {{ $labels.instance }}"
-
-    - name: Apply Prometheus ConfigMap
-      shell: k3s kubectl apply -f /tmp/prometheus-config.yml
-
-    - name: Create Prometheus Deployment
-      copy:
-        dest: /tmp/prometheus-deploy.yml
-        content: |
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: prometheus
-            namespace: monitoring
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: prometheus
-            template:
-              metadata:
-                labels:
-                  app: prometheus
-              spec:
-                nodeSelector:
-                  node-role.kubernetes.io/master: "true"
-                tolerations:
-                  - key: node-role.kubernetes.io/master
-                    effect: NoSchedule
-                serviceAccountName: prometheus
-                containers:
-                  - name: prometheus
-                    image: prom/prometheus:latest
-                    ports:
-                      - containerPort: 9090
-                    args:
-                      - '--config.file=/etc/prometheus/prometheus.yml'
-                      - '--storage.tsdb.path=/prometheus'
-                      - '--storage.tsdb.retention.time=7d'
-                      - '--storage.tsdb.retention.size=2GB'
-                    resources:
-                      limits:
-                        memory: 512Mi
-                        cpu: 500m
-                      requests:
-                        memory: 256Mi
-                        cpu: 200m
-                    volumeMounts:
-                      - name: config
-                        mountPath: /etc/prometheus
-                      - name: data
-                        mountPath: /prometheus
-                volumes:
-                  - name: config
-                    configMap:
-                      name: prometheus-config
-                  - name: data
-                    emptyDir: {}
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: prometheus
-            namespace: monitoring
-          spec:
-            type: NodePort
-            ports:
-              - port: 9090
-                targetPort: 9090
-                nodePort: 30090
-            selector:
-              app: prometheus
-
-    - name: Create Prometheus ServiceAccount and RBAC
-      copy:
-        dest: /tmp/prometheus-rbac.yml
-        content: |
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: prometheus
-            namespace: monitoring
-          ---
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: ClusterRole
-          metadata:
-            name: prometheus
-          rules:
-            - apiGroups: [""]
-              resources: ["nodes", "nodes/proxy", "services", "endpoints", "pods"]
-              verbs: ["get", "list", "watch"]
-            - apiGroups: [""]
-              resources: ["configmaps"]
-              verbs: ["get"]
-            - nonResourceURLs: ["/metrics"]
-              verbs: ["get"]
-          ---
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: ClusterRoleBinding
-          metadata:
-            name: prometheus
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: ClusterRole
-            name: prometheus
-          subjects:
-            - kind: ServiceAccount
-              name: prometheus
-              namespace: monitoring
-
-    - name: Apply Prometheus RBAC
-      shell: k3s kubectl apply -f /tmp/prometheus-rbac.yml
-
-    - name: Apply Prometheus Deployment
-      shell: k3s kubectl apply -f /tmp/prometheus-deploy.yml
-
-    - name: Create AlertManager Deployment
-      copy:
-        dest: /tmp/alertmanager-deploy.yml
-        content: |
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: alertmanager
-            namespace: monitoring
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: alertmanager
-            template:
-              metadata:
-                labels:
-                  app: alertmanager
-              spec:
-                nodeSelector:
-                  node-role.kubernetes.io/master: "true"
-                tolerations:
-                  - key: node-role.kubernetes.io/master
-                    effect: NoSchedule
-                containers:
-                  - name: alertmanager
-                    image: prom/alertmanager:latest
-                    ports:
-                      - containerPort: 9093
-                    resources:
-                      limits:
-                        memory: 128Mi
-                        cpu: 100m
-                      requests:
-                        memory: 64Mi
-                        cpu: 50m
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: alertmanager
-            namespace: monitoring
-          spec:
-            type: NodePort
-            ports:
-              - port: 9093
-                targetPort: 9093
-                nodePort: 30093
-            selector:
-              app: alertmanager
-
-    - name: Apply AlertManager Deployment
-      shell: k3s kubectl apply -f /tmp/alertmanager-deploy.yml
-
-    - name: Create Grafana Deployment
-      copy:
-        dest: /tmp/grafana-deploy.yml
-        content: |
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: grafana
-            namespace: monitoring
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: grafana
-            template:
-              metadata:
-                labels:
-                  app: grafana
-              spec:
-                nodeSelector:
-                  node-role.kubernetes.io/master: "true"
-                tolerations:
-                  - key: node-role.kubernetes.io/master
-                    effect: NoSchedule
-                containers:
-                  - name: grafana
-                    image: grafana/grafana:latest
-                    ports:
-                      - containerPort: 3000
-                    env:
-                      - name: GF_SECURITY_ADMIN_USER
-                        value: "admin"
-                      - name: GF_SECURITY_ADMIN_PASSWORD
-                        value: "odroid"
-                    resources:
-                      limits:
-                        memory: 256Mi
-                        cpu: 300m
-                      requests:
-                        memory: 128Mi
-                        cpu: 100m
-                    volumeMounts:
-                      - name: data
-                        mountPath: /var/lib/grafana
-                volumes:
-                  - name: data
-                    emptyDir: {}
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: grafana
-            namespace: monitoring
-          spec:
-            type: NodePort
-            ports:
-              - port: 3000
-                targetPort: 3000
-                nodePort: 30030
-            selector:
-              app: grafana
-
-    - name: Apply Grafana Deployment
-      shell: k3s kubectl apply -f /tmp/grafana-deploy.yml
-
-    - name: Wait for pods to start
-      pause:
-        seconds: 60
-
-    - name: Check monitoring pods status
+    - name: Get monitoring pods status
       shell: k3s kubectl get pods -n monitoring -o wide
       register: monitoring_pods
       changed_when: false
@@ -415,10 +154,15 @@
     - name: Display monitoring status
       debug:
         msg: |
-          === Monitoring Stack Deployed ===
+          === Monitoring Stack (Helm) ===
           {{ monitoring_pods.stdout }}
 
           === Access URLs ===
           Prometheus:    http://192.168.1.241:30090
           Grafana:       http://192.168.1.241:30030  (admin / odroid)
           AlertManager:  http://192.168.1.241:30093
+
+          === Helm 관리 명령어 ===
+          상태 확인: helm list -n monitoring
+          업그레이드: helm upgrade monitoring prometheus-community/kube-prometheus-stack -n monitoring --values /tmp/monitoring-values.yml
+          삭제:      helm uninstall monitoring -n monitoring
