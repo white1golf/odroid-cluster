@@ -1,0 +1,27 @@
+---
+- name: Test connectivity to ODROID cluster
+  hosts: odroid_cluster
+  gather_facts: yes
+
+  tasks:
+    - name: Test connection
+      debug:
+        msg: "Successfully connected to {{ inventory_hostname }} ({{ ansible_default_ipv4.address }})"
+
+    - name: Check Python version
+      command: python3 --version
+      register: python_version
+      changed_when: false
+
+    - name: Display Python version
+      debug:
+        msg: "Python version: {{ python_version.stdout }}"
+
+    - name: Check if Ansible can run commands
+      shell: echo "Ansible connection test"
+      register: test_output
+      changed_when: false
+
+    - name: Display test output
+      debug:
+        msg: "{{ test_output.stdout }}"

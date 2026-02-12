@@ -1,0 +1,23 @@
+
+==========================
+name: odroid 1
+mac: 00-1E-06-43-DB-42
+ip: 192.168.1.241
+username/password: ordroid / odroid
+==========================
+name: odroid 2 
+mac: 00-1E-06-43-DB-A5
+ip: 192.168.1.190
+username/password: odroid / odroid
+===========================
+name: odroid 3
+mac: 00-1E-06-43-DB-A3
+ip: 192.168.1.188
+username/password: odroid / odroid
+===========================
+name: odroid 4
+mac: 00-1E-06-43-DB-A9
+ip: 192.168.1.194
+username/password: odroid / odroid
+===========================
+

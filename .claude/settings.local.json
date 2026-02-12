@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ansible:*)",
+      "Bash(pip install:*)",
+      "Bash(python3 -m pip install:*)",
+      "Bash(python -m pip install:*)",
+      "Bash(uv pip install:*)",
+      "Bash(uv venv:*)",
+      "Bash(source:*)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(pip --version:*)",
+      "Bash(python -m pip:*)",
+      "Bash(python -m venv:*)",
+      "Bash(wsl --list:*)",
+      "Bash(ansible-playbook:*)"
+    ]
+  }
+}
